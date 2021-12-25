@@ -11,19 +11,19 @@ using System.Diagnostics;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
-using CsharpExtensions.Log;
 using System.Threading.Tasks;
 using System.Reactive.Linq;
 using MySqlConnector;
-using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Newtonsoft.Json.Linq;
 
 namespace CSharpExtensions.OpenSource.DbContext
 {
     public static class DbContextExtensions
     {
+
         public static IOrderedQueryable<T> SortBy<T, TS>(this IQueryable<T> q, Expression<Func<T, TS>> keySelector, bool asc = true)
         {
+
             if (!asc)
             {
                 return q.OrderByDescending(keySelector);
@@ -31,31 +31,31 @@ namespace CSharpExtensions.OpenSource.DbContext
             return q.OrderBy(keySelector);
         }
 
-        public static bool SchemaCheck(this DbContext dbContext, List<string> excludeList = null)
+        public static bool SchemaCheck(this Microsoft.EntityFrameworkCore.DbContext dbContext, List<string>? excludeList = null)
         {
             excludeList ??= new List<string>();
-            MethodInfo dbContextSetMethod = typeof(DbContext).GetMethod(nameof(DbContext.Set), BindingFlags.Public | BindingFlags.Instance);
+            MethodInfo dbContextSetMethod = typeof(Microsoft.EntityFrameworkCore.DbContext).GetMethod(nameof(Microsoft.EntityFrameworkCore.DbContext.Set), BindingFlags.Public | BindingFlags.Instance);
             var dbSetsPropsTypes = dbContext.GetType().GetProperties()
                 .Where(x => x.PropertyType.Name.ToLower().Contains("dbset") && !excludeList.Any(y => y.ToLower() == x.Name.ToLower()))
                 .Select(x => x.PropertyType).ToList();
 
             dbContext.Database.SetCommandTimeout(20000);
-
             foreach (var prop in dbSetsPropsTypes)
             {
                 var dbSetType = prop.GetGenericArguments()[0];
                 var dbSetMethod = dbContextSetMethod?.MakeGenericMethod(dbSetType);
+
                 try
                 {
-                    var b = (IQueryable<object>)dbSetMethod?.Invoke(dbContext, null);
+                    var b = dbSetMethod?.Invoke(dbContext, null) as IQueryable<object>;
                     _ = b?.FirstOrDefault();
                 }
                 catch (Exception ex)
                 {
                     throw new Exception(dbSetType.FullName, ex);
                 }
-            }
 
+            }
             return true;
         }
 
@@ -64,29 +64,30 @@ namespace CSharpExtensions.OpenSource.DbContext
         public static async Task<List<T>> GetAllByPartitions<T>(this IQueryable<T> q, string tableName = "table", int itemsPerPartitions = 1000)
         {
             var lst = new List<T>();
-            await q.ExecAllByPartitions(async (data) => lst.AddRange(data), tableName, itemsPerPartitions);
+            await q.ExecAllByPartitions(data => { lst.AddRange(data); return Task.CompletedTask; }, tableName, itemsPerPartitions);
             return lst;
         }
 
-        public static Task ExecAllByPartitions<T>(this DbSet<T> dbSet, Func<List<T>, Task> exec, int itemsPerPartitions = 1000, int? tableCount = null, int? startIndex = null, bool skipTableCount = true) where T : class, new()
-            => ExecAllByPartitions(dbSet.AsQueryable(), exec, dbSet.GetTableName(), itemsPerPartitions, tableCount, startIndex, skipTableCount);
-        public static async Task ExecAllByPartitions<T>(this IQueryable<T> q, Func<List<T>, Task> exec, string tableName = "table", int itemsPerPartitions = 1000, int? tableCount = null, int? startIndex = null, bool skipTableCount = true)
+        public static Task ExecAllByPartitions<T>(this DbSet<T> dbSet, Func<List<T>, Task> exec, int itemsPerPartitions = 1000, int? tableCount = null, int? startIndex = null, bool skipTableCount = true, Action<string>? logger = null) where T : class, new()
+            => ExecAllByPartitions(dbSet.AsQueryable(), exec, dbSet.GetTableName(), itemsPerPartitions, tableCount, startIndex, skipTableCount, logger);
+        public static async Task ExecAllByPartitions<T>(this IQueryable<T> q, Func<List<T>, Task> exec, string tableName = "table", int itemsPerPartitions = 1000, int? tableCount = null, int? startIndex = null, bool skipTableCount = true, Action<string>? logger = null)
         {
+            logger = logger ?? (str => { });
             tableCount ??= !skipTableCount ? await q.CountAsync() : null;
             int i = startIndex == null ? 0 : (int)Math.Floor((1.0 * startIndex.Value) / itemsPerPartitions);
             int? times = tableCount == null ? null : (int)Math.Ceiling((1.0 * tableCount.Value) / itemsPerPartitions);
             int? leftItems = tableCount == null ? null : tableCount - (i * itemsPerPartitions);
-            Logger.Debug($"ExecAllByPartitions - {tableName} - {tableCount:n0} total items{(i > 0 ? $" skiped {tableCount:n0 - leftItems:n0} items" : "")} - {times:n0} gets {(i > 0 ? $" skiped {i}" : "")}, {itemsPerPartitions} per get");
+            logger($"ExecAllByPartitions - {tableName} - {tableCount:n0} total items{(i > 0 ? $" skiped {tableCount:n0 - leftItems:n0} items" : "")} - {times:n0} gets {(i > 0 ? $" skiped {i}" : "")}, {itemsPerPartitions} per get");
             var total = 0;
             while (true)
             {
                 if (times != null && i > times) { return; }
                 var indexStr = times != null ? $"{i:n0}/{times:n0}" : $"iteration num {i:n0}";
-                Logger.Debug($"ExecAllByPartitions - {tableName} - start {indexStr}, total exec {total:n0}{(leftItems != null ? $"/{leftItems:n0}" : "")}");
+                logger($"ExecAllByPartitions - {tableName} - start {indexStr}, total exec {total:n0}{(leftItems != null ? $"/{leftItems:n0}" : "")}");
                 var tmp = await q.Skip(i * itemsPerPartitions).Take(itemsPerPartitions).ToListAsync();
                 await exec(tmp);
                 total += tmp.Count;
-                Logger.Debug($"ExecAllByPartitions - {tableName} - finish {indexStr}, total exec {total:n0}{(leftItems != null ? $"/{leftItems:n0}" : "")}");
+                logger($"ExecAllByPartitions - {tableName} - finish {indexStr}, total exec {total:n0}{(leftItems != null ? $"/{leftItems:n0}" : "")}");
                 if (tmp.Count <= 0) { return; }
                 i++;
             }
@@ -132,8 +133,9 @@ namespace CSharpExtensions.OpenSource.DbContext
             //return typeof(T).GetProperties();
         }
 
-        public static async Task<(List<T> inserted, List<T> updated, List<T> unchanged, List<T> deleted, long ms)> BulkInsertUpdateOrDelete<T>(this DbContext dbContext, List<T> data, List<string>? propsToCompare = null, List<string>? excludePropsList = null, Action<List<T>>? delAction = null, Action<List<T>>? postInstert = null, Action<List<T>>? postUpdated = null, Action<List<T>>? postUnchanged = null, bool disableUpdate = false, bool disableLog = false, bool disableDelete = false) where T : class, new()
+        public static async Task<(List<T> inserted, List<T> updated, List<T> unchanged, List<T> deleted, long ms)> BulkInsertUpdateOrDelete<T>(this Microsoft.EntityFrameworkCore.DbContext dbContext, List<T> data, List<string>? propsToCompare = null, List<string>? excludePropsList = null, Action<List<T>>? delAction = null, Action<List<T>>? postInstert = null, Action<List<T>>? postUpdated = null, Action<List<T>>? postUnchanged = null, bool disableUpdate = false, bool disableLog = false, bool disableDelete = false, Action<string>? logger = null) where T : class, new()
         {
+            logger = logger ?? (str => { });
             if (data == null)
             {
                 return (new List<T>(), new List<T>(), new List<T>(), new List<T>(), 0);
@@ -142,13 +144,13 @@ namespace CSharpExtensions.OpenSource.DbContext
             var AutoDetectChangesEnabled = dbContext.ChangeTracker.AutoDetectChangesEnabled;
             dbContext.ChangeTracker.AutoDetectChangesEnabled = true;
             var tableName = dbSet.GetTableName();
-            Logger.Debug($"{tableName} - start bulking");
+            logger($"{tableName} - start bulking");
 
             Stopwatch stopwatch = new Stopwatch();
             stopwatch.Start();
 
             var existingData = await dbSet.AsNoTracking().ToListAsync();
-            Logger.Debug($"{tableName} - existingData - {existingData.Count} items");
+            logger($"{tableName} - existingData - {existingData.Count} items");
 
             List<(T exist, T newItem)> updatedWithExists = new List<(T exist, T newItem)>();
             List<T> inserted = new List<T>();
@@ -198,7 +200,7 @@ namespace CSharpExtensions.OpenSource.DbContext
                 deleted.ForEach(x => dbSet.Attach(x));
             }
 
-            Logger.Debug($"{tableName} - detect inserted={inserted.Count}, updated={updated.Count}, unchanged={unchanged.Count}, deleted={deleted.Count}");
+            logger($"{tableName} - detect inserted={inserted.Count}, updated={updated.Count}, unchanged={unchanged.Count}, deleted={deleted.Count}");
 
             postInstert?.Invoke(inserted);
             await dbSet.AddRangeAsync(inserted);
@@ -207,11 +209,11 @@ namespace CSharpExtensions.OpenSource.DbContext
             postUpdated?.Invoke(updated);
             postUnchanged?.Invoke(unchanged);
 
-            Logger.Debug($"{tableName} - post actions");
+            logger($"{tableName} - post actions");
 
-            Logger.Debug($"{tableName} - start saving");
+            logger($"{tableName} - start saving");
             await dbContext.SaveChangesAsync();
-            Logger.Debug($"{tableName} - saved");
+            logger($"{tableName} - saved");
 
             stopwatch.Stop();
 
@@ -219,14 +221,14 @@ namespace CSharpExtensions.OpenSource.DbContext
 
             if (!disableLog)
             {
-                Logger.Debug($"{typeof(T).Name} - inserted={inserted.Count}, updated={updated.Count}, unchanged={unchanged.Count}, deleted={deleted.Count} takes timespan = {TimeSpan.FromMilliseconds(result.ms)}");
+                logger($"{typeof(T).Name} - inserted={inserted.Count}, updated={updated.Count}, unchanged={unchanged.Count}, deleted={deleted.Count} takes timespan = {TimeSpan.FromMilliseconds(result.ms)}");
             }
             dbContext.ChangeTracker.AutoDetectChangesEnabled = AutoDetectChangesEnabled;
             dbContext.Disattached();
             return result;
         }
 
-        public static void RevertChanges(this DbContext context)
+        public static void RevertChanges(this Microsoft.EntityFrameworkCore.DbContext context)
         {
             var changedEntries = context.ChangeTracker.Entries()
                                         .Where(x => x.State != EntityState.Unchanged).ToList();
@@ -251,13 +253,14 @@ namespace CSharpExtensions.OpenSource.DbContext
             }
         }
 
-        public static void Disattached(this DbContext context)
+        public static void Disattached(this Microsoft.EntityFrameworkCore.DbContext context)
         {
             context.ChangeTracker.Entries().ToList().ForEach(x => x.State = EntityState.Detached);
         }
 
-        public static async Task<(List<T> inserted, List<T> updated, List<T> unchanged, long ms)> BulkInsertOrUpdate<T>(this DbContext dbContext, List<T> data, List<string>? propsToCompare = null, List<string>? excludePropsList = null, Action<List<T>>? postInstert = null, Action<List<T>>? postUpdated = null, Action<List<T>>? postUnchanged = null, bool disableUpdate = false, bool disableLog = false) where T : class, new()
+        public static async Task<(List<T> inserted, List<T> updated, List<T> unchanged, long ms)> BulkInsertOrUpdate<T>(this Microsoft.EntityFrameworkCore.DbContext dbContext, List<T> data, List<string>? propsToCompare = null, List<string>? excludePropsList = null, Action<List<T>>? postInstert = null, Action<List<T>>? postUpdated = null, Action<List<T>>? postUnchanged = null, bool disableUpdate = false, bool disableLog = false, Action<string>? logger = null) where T : class, new()
         {
+            logger = logger ?? (str => { });
             if (!data.GetEmptyIfNull().Any())
             {
                 return (new(), new(), new(), 0);
@@ -268,7 +271,7 @@ namespace CSharpExtensions.OpenSource.DbContext
             var QueryTrackingBehavior = dbContext.ChangeTracker.QueryTrackingBehavior;
             dbContext.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
             var tableName = dbSet.GetTableName();
-            Logger.Debug($"{tableName} - start bulking");
+            logger($"{tableName} - start bulking");
 
             Stopwatch stopwatch = new Stopwatch();
             stopwatch.Start();
@@ -306,9 +309,9 @@ namespace CSharpExtensions.OpenSource.DbContext
                 index++;
                 if (index % 1000 == 0)
                 {
-                    Logger.Debug($"{tableName} - start saving {index}/{data.Count}");
+                    logger($"{tableName} - start saving {index}/{data.Count}");
                     await dbContext.SaveChangesAsync();
-                    Logger.Debug($"{tableName} - saved {index}/{data.Count}");
+                    logger($"{tableName} - saved {index}/{data.Count}");
                 }
                 index++;
             }
@@ -317,21 +320,21 @@ namespace CSharpExtensions.OpenSource.DbContext
             updated.ForEach(x => dbSet.Attach(x));
             dbContext.ChangeTracker.DetectChanges();
 
-            Logger.Debug($"{tableName} - detect inserted={inserted.Count}, updated={updated.Count}, unchanged={unchanged.Count}");
+            logger($"{tableName} - detect inserted={inserted.Count}, updated={updated.Count}, unchanged={unchanged.Count}");
 
-            Logger.Debug($"{tableName} - start saving {index}/{data.Count}");
+            logger($"{tableName} - start saving {index}/{data.Count}");
             await dbContext.SaveChangesAsync();
-            Logger.Debug($"{tableName} - saved {index}/{data.Count}");
+            logger($"{tableName} - saved {index}/{data.Count}");
 
             postInstert?.Invoke(inserted);
             postUpdated?.Invoke(updated);
             postUnchanged?.Invoke(unchanged);
 
-            Logger.Debug($"{tableName} - post actions");
+            logger($"{tableName} - post actions");
 
-            Logger.Debug($"{tableName} - start saving");
+            logger($"{tableName} - start saving");
             await dbContext.SaveChangesAsync();
-            Logger.Debug($"{tableName} - saved");
+            logger($"{tableName} - saved");
 
             stopwatch.Stop();
 
@@ -339,7 +342,7 @@ namespace CSharpExtensions.OpenSource.DbContext
 
             if (!disableLog)
             {
-                Logger.Debug($"{typeof(T).Name} - inserted={inserted.Count}, updated={updated.Count}, unchanged={unchanged.Count} takes timespan = {TimeSpan.FromMilliseconds(result.ms)}");
+                logger($"{typeof(T).Name} - inserted={inserted.Count}, updated={updated.Count}, unchanged={unchanged.Count} takes timespan = {TimeSpan.FromMilliseconds(result.ms)}");
             }
 
             dbContext.ChangeTracker.AutoDetectChangesEnabled = AutoDetectChangesEnabled;
@@ -349,8 +352,9 @@ namespace CSharpExtensions.OpenSource.DbContext
         }
         public static bool IsDuplicateError(this Exception? ex) => ex?.ToString()?.ToLower()?.Contains("duplicate entry") ?? false;
 
-        public static async Task<(List<T> inserted, long ms)> BulkInsertIfMissing2<T>(this DbContext dbContext, List<T> data, List<string>? propsToCompare = null, Action<List<T>>? postInstert = null, bool disableLog = false) where T : class, new()
+        public static async Task<(List<T> inserted, long ms)> BulkInsertIfMissing2<T>(this Microsoft.EntityFrameworkCore.DbContext dbContext, List<T> data, List<string>? propsToCompare = null, Action<List<T>>? postInstert = null, bool disableLog = false, Action<string>? logger = null) where T : class, new()
         {
+            logger = logger ?? (str => { });
             if (!data.GetEmptyIfNull().Any())
             {
                 return (new(), 0);
@@ -361,7 +365,7 @@ namespace CSharpExtensions.OpenSource.DbContext
             var QueryTrackingBehavior = dbContext.ChangeTracker.QueryTrackingBehavior;
             dbContext.ChangeTracker.QueryTrackingBehavior = QueryTrackingBehavior.NoTracking;
             var tableName = dbSet.GetTableName();
-            Logger.Debug($"{tableName} - start bulking {data.Count} items");
+            logger($"{tableName} - start bulking {data.Count} items");
 
             Stopwatch stopwatch = new Stopwatch();
             stopwatch.Start();
@@ -391,7 +395,7 @@ namespace CSharpExtensions.OpenSource.DbContext
                 index++;
                 if (index % 1000 == 0)
                 {
-                    Logger.Debug($"{tableName} - {index}/{data.Count}");
+                    logger($"{tableName} - {index}/{data.Count}");
                 }
             }
 
@@ -402,7 +406,7 @@ namespace CSharpExtensions.OpenSource.DbContext
 
             if (!disableLog)
             {
-                Logger.Debug($"{typeof(T).Name} - inserted={inserted.Count} takes timespan = {TimeSpan.FromMilliseconds(result.ms)}");
+                logger($"{typeof(T).Name} - inserted={inserted.Count} takes timespan = {TimeSpan.FromMilliseconds(result.ms)}");
             }
 
             dbContext.ChangeTracker.AutoDetectChangesEnabled = AutoDetectChangesEnabled;
@@ -411,12 +415,13 @@ namespace CSharpExtensions.OpenSource.DbContext
             return result;
         }
 
-        public static async Task<(List<T> inserted, long ms)> BulkInsertIfMissing<T>(this DbContext dbContext, List<T> data, List<string>? propsToCompare = null, Action<List<T>>? postInstert = null, bool disableLog = false) where T : class, new()
+        public static async Task<(List<T> inserted, long ms)> BulkInsertIfMissing<T>(this Microsoft.EntityFrameworkCore.DbContext dbContext, List<T> data, List<string>? propsToCompare = null, Action<List<T>>? postInstert = null, bool disableLog = false, Action<string>? logger = null) where T : class, new()
         {
+            logger = logger ?? (str => { });
             var result = await BulkInsertOrUpdate(dbContext, data, propsToCompare, null, postInstert, null, null, true, true);
             if (!disableLog)
             {
-                Logger.Debug($"{typeof(T).Name} - inserted={result.inserted.Count} takes timespan = {TimeSpan.FromMilliseconds(result.ms)}");
+                logger($"{typeof(T).Name} - inserted={result.inserted.Count} takes timespan = {TimeSpan.FromMilliseconds(result.ms)}");
             }
             return (result.inserted, result.ms);
         }
@@ -424,7 +429,7 @@ namespace CSharpExtensions.OpenSource.DbContext
         public static string PreventSqlInj(this string str) => (str ?? "").Replace("'", "''");
 
         public static async Task<(bool isNew, T item)> AddOrUpdate<T>(
-            this DbContext dbContext,
+            this Microsoft.EntityFrameworkCore.DbContext dbContext,
             T newData,
             Expression<Func<T, bool>>? predicate = null,
             bool autoSave = false,
@@ -476,7 +481,7 @@ namespace CSharpExtensions.OpenSource.DbContext
             return (isNew, search);
         }
 
-        public static async Task UpdateQuery<T>(this DbContext dbContext, Expression<Func<T, bool>> predicate, Action<T> modify, bool autoSave = true, bool ignoreDuplicateError = false) where T : class, new()
+        public static async Task UpdateQuery<T>(this Microsoft.EntityFrameworkCore.DbContext dbContext, Expression<Func<T, bool>> predicate, Action<T> modify, bool autoSave = true, bool ignoreDuplicateError = false) where T : class, new()
         {
             var dbSet = dbContext.Set<T>();
             var AutoDetectChangesEnabled = dbContext.ChangeTracker.AutoDetectChangesEnabled;
@@ -508,7 +513,7 @@ namespace CSharpExtensions.OpenSource.DbContext
             dbContext.ChangeTracker.AutoDetectChangesEnabled = AutoDetectChangesEnabled;
         }
 
-        public static async Task<int> Delete<T>(this DbContext dbContext, Expression<Func<T, bool>> predicate) where T : class
+        public static async Task<int> Delete<T>(this Microsoft.EntityFrameworkCore.DbContext dbContext, Expression<Func<T, bool>> predicate) where T : class
         {
             var dbSet = dbContext.Set<T>();
             var lst = dbSet.Where(predicate).ToList();
@@ -517,9 +522,9 @@ namespace CSharpExtensions.OpenSource.DbContext
             return lst.Count;
         }
 
-        public static async Task<IEnumerable<T>> ExecuteReader<T>(this DbContext context, string query) where T : class, new()
+        public static async Task<IEnumerable<T?>> ExecuteReader<T>(this Microsoft.EntityFrameworkCore.DbContext context, string query) where T : class, new()
         {
-            var entities = new List<T>();
+            var entities = new List<T?>();
 
             var connection = context.Database.GetDbConnection();
             var command = connection.CreateCommand();
@@ -539,7 +544,7 @@ namespace CSharpExtensions.OpenSource.DbContext
             return entities;
         }
 
-        public static async Task<string> SqlToJson(this DbContext context, string query)
+        public static async Task<string> SqlToJson(this Microsoft.EntityFrameworkCore.DbContext context, string query)
         {
             var connection = context.Database.GetDbConnection();
             var command = connection.CreateCommand();
@@ -555,7 +560,7 @@ namespace CSharpExtensions.OpenSource.DbContext
             return JsonConvert.SerializeObject(dataTable);
         }
 
-        public static Task<int> ExecuteNonQuery(this DbContext context, string query, int? commandTimeout = null, bool createNewConnection = false)
+        public static Task<int> ExecuteNonQuery(this Microsoft.EntityFrameworkCore.DbContext context, string query, int? commandTimeout = null, bool createNewConnection = false)
         {
             var connection = context.Database.GetDbConnection();
             var command = connection.CreateCommand();
@@ -565,7 +570,7 @@ namespace CSharpExtensions.OpenSource.DbContext
             return context.ExecuteNonQuery(command, createNewConnection);
         }
 
-        public static async Task<int> ExecuteNonQuery(this DbContext context, DbCommand command, bool createNewConnection = false)
+        public static async Task<int> ExecuteNonQuery(this Microsoft.EntityFrameworkCore.DbContext context, DbCommand command, bool createNewConnection = false)
         {
             var connection = context.Database.GetDbConnection();
             if (connection.State != ConnectionState.Open)
@@ -581,7 +586,7 @@ namespace CSharpExtensions.OpenSource.DbContext
             return res;
         }
 
-        public static async Task<T> ExecuteScalar<T>(this DbContext context, string query, bool createNewConnection = false)
+        public static async Task<T?> ExecuteScalar<T>(this Microsoft.EntityFrameworkCore.DbContext context, string query, bool createNewConnection = false)
         {
             var connection = createNewConnection
                                             ? new MySqlConnection(context.Database.GetDbConnection().ConnectionString)
@@ -606,7 +611,7 @@ namespace CSharpExtensions.OpenSource.DbContext
             return (T)res;
         }
 
-        public static DbContextOptions<T> GetDbOptions<T>(this string connectionString) where T : DbContext
+        public static DbContextOptions<T> GetDbOptions<T>(this string connectionString) where T : Microsoft.EntityFrameworkCore.DbContext
         {
             var builder = new DbContextOptionsBuilder<T>().UseMySql(connectionString, ServerVersion.AutoDetect(connectionString), optionsBuilder =>
             {
@@ -619,21 +624,21 @@ namespace CSharpExtensions.OpenSource.DbContext
             return builder.Options;
         }
 
-        public static T NewDbContexts<T>(this string connectionString) where T : DbContext
+        public static T NewDbContexts<T>(this string connectionString) where T : Microsoft.EntityFrameworkCore.DbContext
         {
             var options = connectionString.GetDbOptions<T>();
             T newDbContext = (T)Activator.CreateInstance(typeof(T), options);
             return newDbContext;
         }
 
-        public static T NewDbContexts<T>(this T dbContext) where T : DbContext
+        public static T NewDbContexts<T>(this T dbContext) where T : Microsoft.EntityFrameworkCore.DbContext
         {
             var connection = dbContext.Database.GetDbConnection();
             T newDbContext = (T)Activator.CreateInstance(typeof(T), GetDbOptions<T>(connection.ConnectionString));
             return newDbContext;
         }
 
-        public static T ConvertReaderToRelevantModel<T>(DbDataReader reader) where T : class, new()
+        public static T? ConvertReaderToRelevantModel<T>(DbDataReader reader) where T : class, new()
         {
             T res = new T();
             if (res is JObject or JArray or JToken)
@@ -645,7 +650,7 @@ namespace CSharpExtensions.OpenSource.DbContext
                 var prop = res.GetType().GetProperty(item.Name)!;
                 string objectPropType = prop.PropertyType.Name;
                 string readerPropType = reader[item.Name].GetType().Name;
-                object readerValue = reader[item.Name] == DBNull.Value ? null : reader[item.Name];
+                object? readerValue = reader[item.Name] == DBNull.Value ? null : reader[item.Name];
                 readerValue ??= "";
                 try
                 {
